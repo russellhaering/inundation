@@ -14,7 +14,11 @@
 
 package queue
 
-import "sync"
+import (
+	"sync"
+
+	"tux21b.org/v1/gocql"
+)
 
 type QueueItem []byte
 
@@ -26,7 +30,8 @@ type Queue struct {
 }
 
 type QueueManagerConfig struct {
-	DatabaseHosts []string
+	CassandraHosts    []string
+	CassandraKeyspace string
 }
 
 type QueueManager struct {
@@ -34,6 +39,7 @@ type QueueManager struct {
 	config     QueueManagerConfig
 	queuesLock sync.RWMutex
 	queues     map[string]*Queue
+	db         *gocql.Session
 }
 
 func (queue *Queue) Publish(items []QueueItem) (int, error) {
@@ -48,11 +54,20 @@ func (queue *Queue) Publish(items []QueueItem) (int, error) {
 	return idx, nil
 }
 
-func NewQueueManager(name string, config QueueManagerConfig) *QueueManager {
+func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, error) {
+	cassCluster := gocql.NewCluster(config.CassandraHosts...)
+	cassCluster.Keyspace = config.CassandraKeyspace
+	cassSession, err := cassCluster.CreateSession()
+
+	if err != nil {
+		return nil, err
+	}
+
 	return &QueueManager{
 		name:   name,
 		config: config,
-	}
+		db:     cassSession,
+	}, nil
 }
 
 func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
