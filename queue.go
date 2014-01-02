@@ -23,10 +23,9 @@ import (
 type QueueItem []byte
 
 type Queue struct {
-	id           string
-	nextIndex    int
-	publishLock  sync.Mutex
-	pendingItems []QueueItem
+	id          string
+	nextIndex   int
+	publishLock sync.Mutex
 }
 
 type QueueManagerConfig struct {
@@ -40,18 +39,6 @@ type QueueManager struct {
 	queuesLock sync.RWMutex
 	queues     map[string]*Queue
 	db         *gocql.Session
-}
-
-func (queue *Queue) Publish(items []QueueItem) (int, error) {
-	queue.publishLock.Lock()
-	queue.pendingItems = append(queue.pendingItems, items...)
-
-	// TODO: flush pending items
-	idx := queue.nextIndex
-	queue.nextIndex = idx + len(items)
-	queue.publishLock.Unlock()
-
-	return idx, nil
 }
 
 func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, error) {
@@ -109,5 +96,25 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int, error)
 		return 0, err
 	}
 
-	return queue.Publish(items)
+	queue.publishLock.Lock()
+	defer queue.publishLock.Unlock()
+
+	// TODO: batch pending items
+	idx := queue.nextIndex
+
+	batch := gocql.NewBatch(gocql.UnloggedBatch)
+
+	for i, item := range items {
+		batch.Query(`INSERT INTO ? (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, idx+i, item)
+	}
+
+	err = mgr.db.ExecuteBatch(batch)
+
+	if err != nil {
+		return 0, err
+	}
+
+	queue.nextIndex = idx + len(items)
+
+	return idx, nil
 }
