@@ -25,8 +25,13 @@ type Queue struct {
 	pendingItems []QueueItem
 }
 
+type QueueManagerConfig struct {
+	DatabaseHosts []string
+}
+
 type QueueManager struct {
 	name       string
+	config     QueueManagerConfig
 	queuesLock sync.RWMutex
 	queues     map[string]*Queue
 }
@@ -43,9 +48,10 @@ func (queue *Queue) Publish(items []QueueItem) (int, error) {
 	return idx, nil
 }
 
-func NewQueueManager(name string) *QueueManager {
+func NewQueueManager(name string, config QueueManagerConfig) *QueueManager {
 	return &QueueManager{
-		name: name,
+		name:   name,
+		config: config,
 	}
 }
 
