@@ -14,10 +14,79 @@
 
 package queue
 
-type QueueManager struct {}
+import "sync"
 
 type QueueItem []byte
 
-func (q *QueueManager) Publish(queueID string, items []QueueItem) (int) {
-	return 0
+type Queue struct {
+	id           string
+	nextIndex    int
+	publishLock  sync.Mutex
+	pendingItems []QueueItem
+}
+
+type QueueManager struct {
+	name       string
+	queuesLock sync.RWMutex
+	queues     map[string]*Queue
+}
+
+func (queue *Queue) Publish(items []QueueItem) (int, error) {
+	queue.publishLock.Lock()
+	queue.pendingItems = append(queue.pendingItems, items...)
+
+	// TODO: flush pending items
+	idx := queue.nextIndex
+	queue.nextIndex = idx + len(items)
+	queue.publishLock.Unlock()
+
+	return idx, nil
+}
+
+func NewQueueManager(name string) *QueueManager {
+	return &QueueManager{
+		name: name,
+	}
+}
+
+func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
+	// Hot path: just get the queue from the map
+	mgr.queuesLock.RLock()
+	queue, exists := mgr.queues[queueID]
+	mgr.queuesLock.RUnlock()
+
+	if exists {
+		return queue, nil
+	}
+
+	// TODO: try to register as the queue's manager
+
+	mgr.queuesLock.Lock()
+	queue, exists = mgr.queues[queueID]
+
+	if !exists {
+		queue = &Queue{
+			id: queueID,
+		}
+		mgr.queues[queueID] = queue
+	}
+
+	mgr.queuesLock.Unlock()
+
+	return queue, nil
+}
+
+func (mgr *QueueManager) LookupQueue(queueID string) (string, error) {
+	// TODO: stop pretending we own every queue
+	return mgr.name, nil
+}
+
+func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int, error) {
+	queue, err := mgr.getOrCreateQueue(queueID)
+
+	if err != nil {
+		return 0, err
+	}
+
+	return queue.Publish(items)
 }
