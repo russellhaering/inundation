@@ -65,6 +65,16 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 		return queue, nil
 	}
 
+	// Before we go down the really slow path, see if someone else owns the queue
+	actualManager, err := mgr.LookupQueue(queueID)
+	if err != nil {
+		return nil, err
+	}
+
+	if actualManager != mgr.name {
+		return nil, ErroWrongManager
+	}
+
 	// Slow path: get the write lock, make sure the queue hasn't been created
 	// then create it.
 
@@ -77,7 +87,6 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 	}
 
 	// Attempt to register as the manager for this queue
-	var actualManager string
 	var uselessID string
 	applied, err := mgr.db.Query(`INSERT INTO queue_managers (queue_id, manager_id) VALUES (?, ?) IF NOT EXISTS;`, queueID, mgr.name).ScanCAS(&uselessID, &actualManager)
 
