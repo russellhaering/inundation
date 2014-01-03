@@ -101,7 +101,12 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 
 func (mgr *QueueManager) LookupQueue(queueID string) (string, error) {
 	// TODO: stop pretending we own every queue
-	return mgr.name, nil
+	managerID := ""
+	err := mgr.db.Query(`SELECT manager_id FROM queue_managers WHERE queue_id = ?`, queueID).Scan(&managerID)
+	if err == gocql.ErrNotFound {
+		return "",  nil
+	}
+	return managerID, err
 }
 
 func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, error) {
