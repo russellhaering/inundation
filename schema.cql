@@ -11,3 +11,9 @@ CREATE TABLE IF NOT EXISTS queue_items (
   item_value blob,
   PRIMARY KEY (queue_id, item_id)
 );
+
+CREATE TABLE IF NOT EXISTS queue_managers (
+  queue_id text,
+  manager_id text,
+  PRIMARY KEY (queue_id)
+);
