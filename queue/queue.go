@@ -74,8 +74,20 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 	queue, exists = mgr.queues[queueID]
 
 	if !exists {
+		var lastIndex int64
+		err := mgr.db.Query(`SELECT item_id FROM queue_items WHERE queue_id = ? ORDER BY item_id DESC LIMIT 1`, queueID).Scan(&lastIndex)
+		// Scan returns an ErrNotFound if the queue didn't previously exist. If
+		// that happens we default lastIndex to -1 so that nextIndex will be 0. If
+		// any other error occurs, return it.
+		if err == gocql.ErrNotFound {
+			lastIndex = -1
+		} else if err != nil {
+			return nil, err
+		}
+
 		queue = &Queue{
-			id: queueID,
+			id:        queueID,
+			nextIndex: lastIndex + int64(1),
 		}
 		mgr.queues[queueID] = queue
 	}
