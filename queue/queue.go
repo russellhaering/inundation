@@ -53,6 +53,7 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 	return &QueueManager{
 		name:   name,
 		config: config,
+		queues: make(map[string]*Queue),
 		db:     cassSession,
 	}, nil
 }
@@ -105,7 +106,7 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int, error)
 	batch := gocql.NewBatch(gocql.UnloggedBatch)
 
 	for i, item := range items {
-		batch.Query(`INSERT INTO ? (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, idx+i, item)
+		batch.Query(`INSERT INTO queue_items (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, idx+i, item)
 	}
 
 	err = mgr.db.ExecuteBatch(batch)
