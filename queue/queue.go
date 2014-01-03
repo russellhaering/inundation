@@ -24,7 +24,7 @@ type QueueItem []byte
 
 type Queue struct {
 	id          string
-	nextIndex   int
+	nextIndex   int64
 	publishLock sync.Mutex
 }
 
@@ -90,7 +90,7 @@ func (mgr *QueueManager) LookupQueue(queueID string) (string, error) {
 	return mgr.name, nil
 }
 
-func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int, error) {
+func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, error) {
 	queue, err := mgr.getOrCreateQueue(queueID)
 
 	if err != nil {
@@ -106,7 +106,8 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int, error)
 	batch := gocql.NewBatch(gocql.UnloggedBatch)
 
 	for i, item := range items {
-		batch.Query(`INSERT INTO queue_items (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, idx+i, item)
+		itemID := idx + int64(i)
+		batch.Query(`INSERT INTO queue_items (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, itemID, item)
 	}
 
 	err = mgr.db.ExecuteBatch(batch)
@@ -115,7 +116,7 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int, error)
 		return 0, err
 	}
 
-	queue.nextIndex = idx + len(items)
+	queue.nextIndex = idx + int64(len(items))
 
 	return idx, nil
 }
