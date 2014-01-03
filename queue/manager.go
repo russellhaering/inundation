@@ -94,8 +94,9 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 	}
 
 	// Before we go down the really slow path, see if someone else owns the queue
-	actualManager, err := mgr.LookupQueue(queueID)
-	if err != nil {
+	actualManager := ""
+	err := mgr.db.Query(`SELECT manager_id FROM queue_managers WHERE queue_id = ?`, queueID).Scan(&actualManager)
+	if err != nil && err != gocql.ErrNotFound {
 		return nil, err
 	}
 
@@ -134,15 +135,6 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 
 	mgr.queues[queueID] = queue
 	return queue, nil
-}
-
-func (mgr *QueueManager) LookupQueue(queueID string) (string, error) {
-	managerID := ""
-	err := mgr.db.Query(`SELECT manager_id FROM queue_managers WHERE queue_id = ?`, queueID).Scan(&managerID)
-	if err == gocql.ErrNotFound {
-		return "", nil
-	}
-	return managerID, err
 }
 
 func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, error) {
