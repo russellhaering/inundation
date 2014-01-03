@@ -15,15 +15,23 @@
 package queue
 
 import (
-	"errors"
 	"sync"
+	"time"
 
 	"tux21b.org/v1/gocql"
 )
 
-var (
-	ErroWrongManager = errors.New("queue has another manager")
+const (
+	RESERVATION_TTL = 60
 )
+
+type ErrWrongManager struct {
+	ActualManager string
+}
+
+func (err *ErrWrongManager) Error() string {
+	return "queue has another manager: " + err.ActualManager
+}
 
 type QueueManagerConfig struct {
 	CassandraHosts    []string
@@ -47,12 +55,32 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 		return nil, err
 	}
 
-	return &QueueManager{
+	mgr := &QueueManager{
 		name:   name,
 		config: config,
 		queues: make(map[string]*Queue),
 		db:     cassSession,
-	}, nil
+	}
+
+	go mgr.heartbeatReservations()
+	return mgr, nil
+}
+
+func (mgr *QueueManager) heartbeatReservations() {
+	interval := (RESERVATION_TTL / 3) * time.Second
+	for {
+		time.Sleep(interval)
+		batch := gocql.NewBatch(gocql.UnloggedBatch)
+		mgr.queuesLock.RLock()
+		for queueID := range mgr.queues {
+			batch.Query(`UPDATE queue_managers USING TTL ? SET manager_id = ? WHERE queue_id = ?`,
+				RESERVATION_TTL, mgr.name, queueID)
+		}
+		mgr.queuesLock.RUnlock()
+
+		// TODO: Panic hard if an error occurs
+		mgr.db.ExecuteBatch(batch)
+	}
 }
 
 func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
@@ -71,13 +99,12 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 		return nil, err
 	}
 
-	if actualManager != mgr.name {
-		return nil, ErroWrongManager
+	if actualManager != "" && actualManager != mgr.name {
+		return nil, &ErrWrongManager{actualManager}
 	}
 
 	// Slow path: get the write lock, make sure the queue hasn't been created
 	// then create it.
-
 	mgr.queuesLock.Lock()
 	defer mgr.queuesLock.Unlock()
 	queue, exists = mgr.queues[queueID]
@@ -88,7 +115,8 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 
 	// Attempt to register as the manager for this queue
 	var uselessID string
-	applied, err := mgr.db.Query(`INSERT INTO queue_managers (queue_id, manager_id) VALUES (?, ?) IF NOT EXISTS;`, queueID, mgr.name).ScanCAS(&uselessID, &actualManager)
+	applied, err := mgr.db.Query(`INSERT INTO queue_managers (queue_id, manager_id) VALUES (?, ?) IF NOT EXISTS USING TTL ?;`,
+		queueID, mgr.name, RESERVATION_TTL).ScanCAS(&uselessID, &actualManager)
 
 	if err != nil {
 		return nil, err
@@ -96,7 +124,7 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 
 	if !applied && actualManager != mgr.name {
 		_ = uselessID
-		return nil, ErroWrongManager
+		return nil, &ErrWrongManager{actualManager}
 	}
 
 	queue, err = NewQueue(mgr.db, queueID)
@@ -109,11 +137,10 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 }
 
 func (mgr *QueueManager) LookupQueue(queueID string) (string, error) {
-	// TODO: stop pretending we own every queue
 	managerID := ""
 	err := mgr.db.Query(`SELECT manager_id FROM queue_managers WHERE queue_id = ?`, queueID).Scan(&managerID)
 	if err == gocql.ErrNotFound {
-		return "",  nil
+		return "", nil
 	}
 	return managerID, err
 }
