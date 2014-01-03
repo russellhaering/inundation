@@ -15,8 +15,6 @@
 package queue
 
 import (
-	"sync"
-
 	"tux21b.org/v1/gocql"
 )
 
@@ -36,6 +34,28 @@ type Queue struct {
 	id              string
 	nextIndex       int64
 	pendingRequests chan *QueueItemBatchRequest
+}
+
+func NewQueue(db *gocql.Session, id string) (*Queue, error) {
+	var lastIndex int64
+	err := db.Query(`SELECT item_id FROM queue_items WHERE queue_id = ? ORDER BY item_id DESC LIMIT 1`, id).Scan(&lastIndex)
+	// Scan returns an ErrNotFound if the queue didn't previously exist. If
+	// that happens we default lastIndex to -1 so that nextIndex will be 0. If
+	// any other error occurs, return it.
+	if err == gocql.ErrNotFound {
+		lastIndex = -1
+	} else if err != nil {
+		return nil, err
+	}
+
+	queue := &Queue{
+		id:              id,
+		nextIndex:       lastIndex + int64(1),
+		pendingRequests: make(chan *QueueItemBatchRequest),
+	}
+
+	go queue.process(db)
+	return queue, nil
 }
 
 func (queue *Queue) publish(items []QueueItem) (int64, error) {
@@ -106,90 +126,4 @@ func (queue *Queue) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequ
 	}
 
 	queue.nextIndex += i
-}
-
-type QueueManagerConfig struct {
-	CassandraHosts    []string
-	CassandraKeyspace string
-}
-
-type QueueManager struct {
-	name       string
-	config     QueueManagerConfig
-	queuesLock sync.RWMutex
-	queues     map[string]*Queue
-	db         *gocql.Session
-}
-
-func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, error) {
-	cassCluster := gocql.NewCluster(config.CassandraHosts...)
-	cassCluster.Keyspace = config.CassandraKeyspace
-	cassSession, err := cassCluster.CreateSession()
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &QueueManager{
-		name:   name,
-		config: config,
-		queues: make(map[string]*Queue),
-		db:     cassSession,
-	}, nil
-}
-
-func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
-	// Hot path: just get the queue from the map
-	mgr.queuesLock.RLock()
-	queue, exists := mgr.queues[queueID]
-	mgr.queuesLock.RUnlock()
-
-	if exists {
-		return queue, nil
-	}
-
-	// TODO: try to register as the queue's manager
-
-	mgr.queuesLock.Lock()
-	queue, exists = mgr.queues[queueID]
-
-	if !exists {
-		var lastIndex int64
-		err := mgr.db.Query(`SELECT item_id FROM queue_items WHERE queue_id = ? ORDER BY item_id DESC LIMIT 1`, queueID).Scan(&lastIndex)
-		// Scan returns an ErrNotFound if the queue didn't previously exist. If
-		// that happens we default lastIndex to -1 so that nextIndex will be 0. If
-		// any other error occurs, return it.
-		if err == gocql.ErrNotFound {
-			lastIndex = -1
-		} else if err != nil {
-			return nil, err
-		}
-
-		queue = &Queue{
-			id:              queueID,
-			nextIndex:       lastIndex + int64(1),
-			pendingRequests: make(chan *QueueItemBatchRequest),
-		}
-		go queue.process(mgr.db)
-		mgr.queues[queueID] = queue
-	}
-
-	mgr.queuesLock.Unlock()
-
-	return queue, nil
-}
-
-func (mgr *QueueManager) LookupQueue(queueID string) (string, error) {
-	// TODO: stop pretending we own every queue
-	return mgr.name, nil
-}
-
-func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, error) {
-	queue, err := mgr.getOrCreateQueue(queueID)
-
-	if err != nil {
-		return 0, err
-	}
-
-	return queue.publish(items)
 }
