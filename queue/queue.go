@@ -22,10 +22,90 @@ import (
 
 type QueueItem []byte
 
+type BatchResult struct {
+	idx int64
+	err error
+}
+
+type QueueItemBatchRequest struct {
+	items      []QueueItem
+	resultChan chan BatchResult
+}
+
 type Queue struct {
-	id          string
-	nextIndex   int64
-	publishLock sync.Mutex
+	id              string
+	nextIndex       int64
+	pendingRequests chan *QueueItemBatchRequest
+}
+
+func (queue *Queue) publish(items []QueueItem) (int64, error) {
+	request := QueueItemBatchRequest{
+		items:      items,
+		resultChan: make(chan BatchResult),
+	}
+	queue.pendingRequests <- &request
+
+	result := <-request.resultChan
+	return result.idx, result.err
+}
+
+func (queue *Queue) process(db *gocql.Session) {
+	requests := []*QueueItemBatchRequest{}
+
+	for {
+		// Our goal here is to shift any pending requests off of the channel and
+		// onto our list, then to batch together all of the requests into a single
+		// database write.
+		//
+		// First, check if any requsts are waiting in the channel
+		select {
+
+		// If a request was waiting in the channel, shift it onto the list.
+		case request := <-queue.pendingRequests:
+			requests = append(requests, request)
+
+		// If no requests were waiting..
+		default:
+			if len(requests) == 0 {
+				// The pending list is also empty. Wait for someone to put a request in
+				// the channel, shift it to the list, then loop back to the top.
+				request := <-queue.pendingRequests
+				requests = append(requests, request)
+			} else {
+				// No more requests are waiting, but we have some in our list. Go!
+				queue.writeBatch(db, requests)
+				requests = []*QueueItemBatchRequest{}
+			}
+		}
+	}
+}
+
+func (queue *Queue) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequest) {
+	dbBatch := gocql.NewBatch(gocql.UnloggedBatch)
+	i := int64(0)
+
+	for _, request := range requests {
+		for _, item := range request.items {
+			itemID := queue.nextIndex + i
+			dbBatch.Query(`INSERT INTO queue_items (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, itemID, item)
+			i++
+		}
+	}
+
+	err := db.ExecuteBatch(dbBatch)
+
+	i = int64(0)
+
+	for _, request := range requests {
+		result := BatchResult{
+			idx: queue.nextIndex + i,
+			err: err,
+		}
+		request.resultChan <- result
+		i += int64(len(request.items))
+	}
+
+	queue.nextIndex += i
 }
 
 type QueueManagerConfig struct {
@@ -86,9 +166,11 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 		}
 
 		queue = &Queue{
-			id:        queueID,
-			nextIndex: lastIndex + int64(1),
+			id:              queueID,
+			nextIndex:       lastIndex + int64(1),
+			pendingRequests: make(chan *QueueItemBatchRequest),
 		}
+		go queue.process(mgr.db)
 		mgr.queues[queueID] = queue
 	}
 
@@ -109,26 +191,5 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, erro
 		return 0, err
 	}
 
-	queue.publishLock.Lock()
-	defer queue.publishLock.Unlock()
-
-	// TODO: batch pending items
-	idx := queue.nextIndex
-
-	batch := gocql.NewBatch(gocql.UnloggedBatch)
-
-	for i, item := range items {
-		itemID := idx + int64(i)
-		batch.Query(`INSERT INTO queue_items (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, itemID, item)
-	}
-
-	err = mgr.db.ExecuteBatch(batch)
-
-	if err != nil {
-		return 0, err
-	}
-
-	queue.nextIndex = idx + int64(len(items))
-
-	return idx, nil
+	return queue.publish(items)
 }
