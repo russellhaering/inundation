@@ -44,7 +44,7 @@ type QueueManager struct {
 	queuesLock sync.RWMutex
 	queues     map[string]*Queue
 	db         *gocql.Session
-	done			 *sync.WaitGroup
+	done       *sync.WaitGroup
 }
 
 func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, error) {
@@ -61,7 +61,7 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 		config: config,
 		queues: make(map[string]*Queue),
 		db:     cassSession,
-		done:		&sync.WaitGroup{},
+		done:   &sync.WaitGroup{},
 	}
 
 	go mgr.heartbeatReservations()
