@@ -15,9 +15,14 @@
 package queue
 
 import (
+	"errors"
 	"sync"
 
 	"tux21b.org/v1/gocql"
+)
+
+var (
+	ErroWrongManager = errors.New("queue has another manager")
 )
 
 type QueueManagerConfig struct {
@@ -60,23 +65,37 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 		return queue, nil
 	}
 
-	// TODO: try to register as the queue's manager
+	// Slow path: get the write lock, make sure the queue hasn't been created
+	// then create it.
 
 	mgr.queuesLock.Lock()
+	defer mgr.queuesLock.Unlock()
 	queue, exists = mgr.queues[queueID]
 
-	if !exists {
-		var err error
-		queue, err = NewQueue(mgr.db, queueID)
-		if err != nil {
-			return nil, err
-		}
-
-		mgr.queues[queueID] = queue
+	if exists {
+		return queue, nil
 	}
 
-	mgr.queuesLock.Unlock()
+	// Attempt to register as the manager for this queue
+	var actualManager string
+	var uselessID string
+	applied, err := mgr.db.Query(`INSERT INTO queue_managers (queue_id, manager_id) VALUES (?, ?) IF NOT EXISTS;`, queueID, mgr.name).ScanCAS(&uselessID, &actualManager)
 
+	if err != nil {
+		return nil, err
+	}
+
+	if !applied && actualManager != mgr.name {
+		_ = uselessID
+		return nil, ErroWrongManager
+	}
+
+	queue, err = NewQueue(mgr.db, queueID)
+	if err != nil {
+		return nil, err
+	}
+
+	mgr.queues[queueID] = queue
 	return queue, nil
 }
 
