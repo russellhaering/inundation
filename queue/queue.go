@@ -15,6 +15,8 @@
 package queue
 
 import (
+	"sync"
+
 	"tux21b.org/v1/gocql"
 )
 
@@ -36,9 +38,9 @@ type Queue struct {
 	pendingRequests chan *QueueItemBatchRequest
 }
 
-func NewQueue(db *gocql.Session, id string) (*Queue, error) {
+func NewQueue(mgr *QueueManager, id string) (*Queue, error) {
 	var lastIndex int64
-	err := db.Query(`SELECT item_id FROM queue_items WHERE queue_id = ? ORDER BY item_id DESC LIMIT 1`, id).Scan(&lastIndex)
+	err := mgr.db.Query(`SELECT item_id FROM queue_items WHERE queue_id = ? ORDER BY item_id DESC LIMIT 1`, id).Scan(&lastIndex)
 	// Scan returns an ErrNotFound if the queue didn't previously exist. If
 	// that happens we default lastIndex to -1 so that nextIndex will be 0. If
 	// any other error occurs, return it.
@@ -54,7 +56,7 @@ func NewQueue(db *gocql.Session, id string) (*Queue, error) {
 		pendingRequests: make(chan *QueueItemBatchRequest),
 	}
 
-	go queue.process(db)
+	go queue.process(mgr.db, mgr.done)
 	return queue, nil
 }
 
@@ -69,7 +71,8 @@ func (queue *Queue) publish(items []QueueItem) (int64, error) {
 	return result.idx, result.err
 }
 
-func (queue *Queue) process(db *gocql.Session) {
+func (queue *Queue) process(db *gocql.Session, done *sync.WaitGroup) {
+	done.Add(1)
 	requests := []*QueueItemBatchRequest{}
 
 	for {
@@ -98,6 +101,7 @@ func (queue *Queue) process(db *gocql.Session) {
 			}
 		}
 	}
+	done.Done()
 }
 
 func (queue *Queue) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequest) {

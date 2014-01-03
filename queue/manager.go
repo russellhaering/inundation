@@ -44,6 +44,7 @@ type QueueManager struct {
 	queuesLock sync.RWMutex
 	queues     map[string]*Queue
 	db         *gocql.Session
+	done			 *sync.WaitGroup
 }
 
 func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, error) {
@@ -60,6 +61,7 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 		config: config,
 		queues: make(map[string]*Queue),
 		db:     cassSession,
+		done:		&sync.WaitGroup{},
 	}
 
 	go mgr.heartbeatReservations()
@@ -67,6 +69,7 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 }
 
 func (mgr *QueueManager) heartbeatReservations() {
+	mgr.done.Add(1)
 	interval := (RESERVATION_TTL / 3) * time.Second
 	for {
 		time.Sleep(interval)
@@ -81,6 +84,7 @@ func (mgr *QueueManager) heartbeatReservations() {
 		// TODO: Panic hard if an error occurs
 		mgr.db.ExecuteBatch(batch)
 	}
+	mgr.done.Done()
 }
 
 func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
@@ -128,7 +132,7 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 		return nil, &ErrWrongManager{actualManager}
 	}
 
-	queue, err = NewQueue(mgr.db, queueID)
+	queue, err = NewQueue(mgr, queueID)
 	if err != nil {
 		return nil, err
 	}
