@@ -73,35 +73,39 @@ func (queue *Queue) publish(items []QueueItem) (int64, error) {
 
 func (queue *Queue) process(db *gocql.Session, done *sync.WaitGroup) {
 	done.Add(1)
+
+	for {
+		request := <-queue.pendingRequests
+
+		if request == nil {
+			break
+		}
+
+		// We got a request - drain any additional requests that are pending, then
+		// flush them all to the database
+		requests := []*QueueItemBatchRequest{request}
+		requests = append(requests, queue.drainPending()...)
+		queue.writeBatch(db, requests)
+	}
+	done.Done()
+}
+
+func (queue *Queue) drainPending() []*QueueItemBatchRequest {
 	requests := []*QueueItemBatchRequest{}
 
 	for {
-		// Our goal here is to shift any pending requests off of the channel and
-		// onto our list, then to batch together all of the requests into a single
-		// database write.
-		//
-		// First, check if any requsts are waiting in the channel
 		select {
-
-		// If a request was waiting in the channel, shift it onto the list.
 		case request := <-queue.pendingRequests:
+			if request == nil {
+				// This will happen (_not_ the default case) if the channel is closed
+				return requests
+			}
 			requests = append(requests, request)
 
-		// If no requests were waiting..
 		default:
-			if len(requests) == 0 {
-				// The pending list is also empty. Wait for someone to put a request in
-				// the channel, shift it to the list, then loop back to the top.
-				request := <-queue.pendingRequests
-				requests = append(requests, request)
-			} else {
-				// No more requests are waiting, but we have some in our list. Go!
-				queue.writeBatch(db, requests)
-				requests = []*QueueItemBatchRequest{}
-			}
+			return requests
 		}
 	}
-	done.Done()
 }
 
 func (queue *Queue) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequest) {
