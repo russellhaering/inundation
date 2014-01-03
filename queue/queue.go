@@ -117,14 +117,19 @@ func (queue *Queue) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequ
 	}
 
 	err := db.ExecuteBatch(dbBatch)
+	queue.respond(requests, err)
+}
 
-	i = int64(0)
+func (queue *Queue) respond(requests []*QueueItemBatchRequest, err error) {
+	i := int64(0)
 
 	for _, request := range requests {
-		result := BatchResult{
-			idx: queue.nextIndex + i,
-			err: err,
+		result := BatchResult{err: err}
+
+		if err == nil {
+			result.idx = queue.nextIndex + i
 		}
+
 		request.resultChan <- result
 		i += int64(len(request.items))
 	}
