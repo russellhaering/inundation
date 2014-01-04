@@ -39,7 +39,7 @@ func (err *ErrWrongManager) Error() string {
 }
 
 type QueueItem struct {
-	ID	int64
+	ID    int64
 	Value QueueItemValue
 }
 
