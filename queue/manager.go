@@ -38,6 +38,11 @@ func (err *ErrWrongManager) Error() string {
 	return "queue has another manager: " + err.ActualManager
 }
 
+type QueueItem struct {
+	ID	int64
+	Value QueueItemValue
+}
+
 type QueueManagerConfig struct {
 	CassandraHosts    []string
 	CassandraKeyspace string
@@ -169,7 +174,7 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 	return queue, nil
 }
 
-func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, error) {
+func (mgr *QueueManager) Publish(queueID string, items []QueueItemValue) (int64, error) {
 	queue, err := mgr.getOrCreateQueue(queueID)
 
 	if err != nil {
@@ -177,6 +182,37 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, erro
 	}
 
 	return queue.publish(items)
+}
+
+func (mgr *QueueManager) Read(queueID string, startIndex int64, count int) ([]QueueItem, error) {
+	query := mgr.db.Query(`SELECT item_id, item_value FROM queue_items WHERE queue_id = ? AND item_id >= ? LIMIT ?;`,
+		queueID, startIndex, count)
+
+	// Disable result paging, we know exactly how much we want
+	query.PageSize(0)
+
+	iter := query.Iter()
+
+	items := []QueueItem{}
+
+	var itemID int64
+	var itemValue QueueItemValue
+
+	for iter.Scan(&itemID, &itemValue) {
+		// We could do better than the built-in append here if it mattered. Common cases are:
+		// - no items
+		// - a few items
+		// - `count` items
+		items = append(items, QueueItem{ID: itemID, Value: itemValue})
+	}
+
+	err := iter.Close()
+
+	if err != nil {
+		return nil, err
+	}
+
+	return items, nil
 }
 
 func (mgr *QueueManager) Shutdown() {

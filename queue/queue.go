@@ -20,7 +20,7 @@ import (
 	"tux21b.org/v1/gocql"
 )
 
-type QueueItem []byte
+type QueueItemValue []byte
 
 type BatchResult struct {
 	idx int64
@@ -28,7 +28,7 @@ type BatchResult struct {
 }
 
 type QueueItemBatchRequest struct {
-	items      []QueueItem
+	items      []QueueItemValue
 	resultChan chan BatchResult
 }
 
@@ -60,7 +60,7 @@ func NewQueue(mgr *QueueManager, id string) (*Queue, error) {
 	return queue, nil
 }
 
-func (queue *Queue) publish(items []QueueItem) (idx int64, err error) {
+func (queue *Queue) publish(items []QueueItemValue) (idx int64, err error) {
 	request := QueueItemBatchRequest{
 		items:      items,
 		resultChan: make(chan BatchResult),
