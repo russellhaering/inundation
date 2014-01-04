@@ -22,10 +22,6 @@ import (
 	"tux21b.org/v1/gocql"
 )
 
-const (
-	RESERVATION_TTL = 60
-)
-
 var (
 	ErrManagerShutdown = errors.New("queue manager is shutdown")
 )
@@ -41,12 +37,21 @@ func (err *ErrWrongManager) Error() string {
 type QueueManagerConfig struct {
 	CassandraHosts    []string
 	CassandraKeyspace string
+	ReservationTTL    time.Duration
+}
+
+func (cfg *QueueManagerConfig) reservationTTL() time.Duration {
+	if cfg.ReservationTTL == 0 {
+		return 60
+	} else {
+		return cfg.ReservationTTL
+	}
 }
 
 type QueueManager struct {
 	name          string
 	config        QueueManagerConfig
-	mu    sync.RWMutex
+	mu            sync.RWMutex
 	writers       map[string]*queueWriter
 	db            *gocql.Session
 	done          *sync.WaitGroup
@@ -77,7 +82,7 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 }
 
 func (mgr *QueueManager) keepAlive() {
-	ticker := time.NewTicker((RESERVATION_TTL / 3.0) * time.Second)
+	ticker := time.NewTicker((mgr.config.reservationTTL() / 3.0) * time.Second)
 
 	for {
 		select {
@@ -98,7 +103,7 @@ func (mgr *QueueManager) heartbeatReservations() {
 	mgr.mu.RLock()
 	for queueID := range mgr.writers {
 		batch.Query(`UPDATE queue_managers USING TTL ? SET manager_id = ? WHERE queue_id = ?`,
-			RESERVATION_TTL, mgr.name, queueID)
+			mgr.config.reservationTTL(), mgr.name, queueID)
 	}
 	mgr.mu.RUnlock()
 
@@ -149,7 +154,7 @@ func (mgr *QueueManager) getOrCreateQueueWriter(queueID string) (*queueWriter, e
 	// Attempt to register as the manager for this queue
 	var uselessID string
 	applied, err := mgr.db.Query(`INSERT INTO queue_managers (queue_id, manager_id) VALUES (?, ?) IF NOT EXISTS USING TTL ?;`,
-		queueID, mgr.name, RESERVATION_TTL).ScanCAS(&uselessID, &actualManager)
+		queueID, mgr.name, mgr.config.reservationTTL()).ScanCAS(&uselessID, &actualManager)
 
 	if err != nil {
 		return nil, err
