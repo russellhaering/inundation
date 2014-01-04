@@ -20,8 +20,6 @@ import (
 	"tux21b.org/v1/gocql"
 )
 
-type QueueItemValue []byte
-
 type BatchResult struct {
 	idx int64
 	err error

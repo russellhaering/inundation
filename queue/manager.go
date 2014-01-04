@@ -38,11 +38,6 @@ func (err *ErrWrongManager) Error() string {
 	return "queue has another manager: " + err.ActualManager
 }
 
-type QueueItem struct {
-	ID    int64
-	Value QueueItemValue
-}
-
 type QueueManagerConfig struct {
 	CassandraHosts    []string
 	CassandraKeyspace string
