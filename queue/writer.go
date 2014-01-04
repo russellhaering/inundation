@@ -20,20 +20,20 @@ import (
 	"tux21b.org/v1/gocql"
 )
 
-type BatchResult struct {
+type batchResult struct {
 	idx int64
 	err error
 }
 
-type QueueItemBatchRequest struct {
+type batchRequest struct {
 	items      []QueueItemValue
-	resultChan chan BatchResult
+	resultChan chan batchResult
 }
 
 type queueWriter struct {
 	id              string
 	nextIndex       int64
-	pendingRequests chan *QueueItemBatchRequest
+	pendingRequests chan *batchRequest
 }
 
 func newQueueWriter(mgr *QueueManager, id string) (*queueWriter, error) {
@@ -51,7 +51,7 @@ func newQueueWriter(mgr *QueueManager, id string) (*queueWriter, error) {
 	writer := &queueWriter{
 		id:              id,
 		nextIndex:       lastIndex + int64(1),
-		pendingRequests: make(chan *QueueItemBatchRequest),
+		pendingRequests: make(chan *batchRequest),
 	}
 
 	go writer.process(mgr.db, mgr.done)
@@ -59,9 +59,9 @@ func newQueueWriter(mgr *QueueManager, id string) (*queueWriter, error) {
 }
 
 func (writer *queueWriter) publish(items []QueueItemValue) (idx int64, err error) {
-	request := QueueItemBatchRequest{
+	request := batchRequest{
 		items:      items,
-		resultChan: make(chan BatchResult),
+		resultChan: make(chan batchResult),
 	}
 
 	defer func() {
@@ -88,7 +88,7 @@ func (writer *queueWriter) process(db *gocql.Session, done *sync.WaitGroup) {
 
 		// We got a request - drain any additional requests that are pending, then
 		// flush them all to the database
-		requests := []*QueueItemBatchRequest{request}
+		requests := []*batchRequest{request}
 		requests = append(requests, writer.drainPending()...)
 		writer.writeBatch(db, requests)
 	}
@@ -99,8 +99,8 @@ func (writer *queueWriter) shutdown() {
 	close(writer.pendingRequests)
 }
 
-func (writer *queueWriter) drainPending() []*QueueItemBatchRequest {
-	requests := []*QueueItemBatchRequest{}
+func (writer *queueWriter) drainPending() []*batchRequest {
+	requests := []*batchRequest{}
 
 	for {
 		select {
@@ -117,7 +117,7 @@ func (writer *queueWriter) drainPending() []*QueueItemBatchRequest {
 	}
 }
 
-func (writer *queueWriter) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequest) {
+func (writer *queueWriter) writeBatch(db *gocql.Session, requests []*batchRequest) {
 	dbBatch := gocql.NewBatch(gocql.UnloggedBatch)
 	i := int64(0)
 
@@ -133,11 +133,11 @@ func (writer *queueWriter) writeBatch(db *gocql.Session, requests []*QueueItemBa
 	writer.respond(requests, err)
 }
 
-func (writer *queueWriter) respond(requests []*QueueItemBatchRequest, err error) {
+func (writer *queueWriter) respond(requests []*batchRequest, err error) {
 	i := int64(0)
 
 	for _, request := range requests {
-		result := BatchResult{err: err}
+		result := batchResult{err: err}
 
 		if err == nil {
 			result.idx = writer.nextIndex + i
