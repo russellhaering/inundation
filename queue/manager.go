@@ -46,8 +46,8 @@ type QueueManagerConfig struct {
 type QueueManager struct {
 	name          string
 	config        QueueManagerConfig
-	queuesLock    sync.RWMutex
-	queues        map[string]*Queue
+	mu    sync.RWMutex
+	writers       map[string]*queueWriter
 	db            *gocql.Session
 	done          *sync.WaitGroup
 	stopKeepAlive chan bool
@@ -66,7 +66,7 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 	mgr := &QueueManager{
 		name:          name,
 		config:        config,
-		queues:        make(map[string]*Queue),
+		writers:       make(map[string]*queueWriter),
 		db:            cassSession,
 		done:          &sync.WaitGroup{},
 		stopKeepAlive: make(chan bool),
@@ -95,29 +95,29 @@ func (mgr *QueueManager) keepAlive() {
 func (mgr *QueueManager) heartbeatReservations() {
 	batch := gocql.NewBatch(gocql.UnloggedBatch)
 
-	mgr.queuesLock.RLock()
-	for queueID := range mgr.queues {
+	mgr.mu.RLock()
+	for queueID := range mgr.writers {
 		batch.Query(`UPDATE queue_managers USING TTL ? SET manager_id = ? WHERE queue_id = ?`,
 			RESERVATION_TTL, mgr.name, queueID)
 	}
-	mgr.queuesLock.RUnlock()
+	mgr.mu.RUnlock()
 
 	// TODO: Panic hard if an error occurs
 	mgr.db.ExecuteBatch(batch)
 }
 
-func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
+func (mgr *QueueManager) getOrCreateQueueWriter(queueID string) (*queueWriter, error) {
 	// Hot path: just get the queue from the map
-	mgr.queuesLock.RLock()
+	mgr.mu.RLock()
 	if mgr.stopped {
 		return nil, ErrManagerShutdown
 	}
 
-	queue, exists := mgr.queues[queueID]
-	mgr.queuesLock.RUnlock()
+	writer, exists := mgr.writers[queueID]
+	mgr.mu.RUnlock()
 
 	if exists {
-		return queue, nil
+		return writer, nil
 	}
 
 	// Before we go down the really slow path, see if someone else owns the queue
@@ -131,19 +131,19 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 		return nil, &ErrWrongManager{actualManager}
 	}
 
-	// Slow path: get the write lock, make sure the queue hasn't been created
+	// Slow path: get the write lock, make sure the writer hasn't been created
 	// then create it.
-	mgr.queuesLock.Lock()
-	defer mgr.queuesLock.Unlock()
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
 
 	if mgr.stopped {
 		return nil, ErrManagerShutdown
 	}
 
-	queue, exists = mgr.queues[queueID]
+	writer, exists = mgr.writers[queueID]
 
 	if exists {
-		return queue, nil
+		return writer, nil
 	}
 
 	// Attempt to register as the manager for this queue
@@ -160,23 +160,23 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 		return nil, &ErrWrongManager{actualManager}
 	}
 
-	queue, err = NewQueue(mgr, queueID)
+	writer, err = newQueueWriter(mgr, queueID)
 	if err != nil {
 		return nil, err
 	}
 
-	mgr.queues[queueID] = queue
-	return queue, nil
+	mgr.writers[queueID] = writer
+	return writer, nil
 }
 
 func (mgr *QueueManager) Publish(queueID string, items []QueueItemValue) (int64, error) {
-	queue, err := mgr.getOrCreateQueue(queueID)
+	writer, err := mgr.getOrCreateQueueWriter(queueID)
 
 	if err != nil {
 		return 0, err
 	}
 
-	return queue.publish(items)
+	return writer.publish(items)
 }
 
 func (mgr *QueueManager) Read(queueID string, startIndex int64, count int) ([]QueueItem, error) {
@@ -211,14 +211,14 @@ func (mgr *QueueManager) Read(queueID string, startIndex int64, count int) ([]Qu
 }
 
 func (mgr *QueueManager) Shutdown() {
-	mgr.queuesLock.Lock()
+	mgr.mu.Lock()
 	mgr.stopped = true
-	for _, queue := range mgr.queues {
-		queue.shutdown()
+	for _, writer := range mgr.writers {
+		writer.shutdown()
 	}
-	mgr.queuesLock.Unlock()
+	mgr.mu.Unlock()
 
-	// Wait for all queues to drain
+	// Wait for all writers to drain
 	mgr.done.Wait()
 
 	// Kill the heartbeat

@@ -30,16 +30,16 @@ type QueueItemBatchRequest struct {
 	resultChan chan BatchResult
 }
 
-type Queue struct {
+type queueWriter struct {
 	id              string
 	nextIndex       int64
 	pendingRequests chan *QueueItemBatchRequest
 }
 
-func NewQueue(mgr *QueueManager, id string) (*Queue, error) {
+func newQueueWriter(mgr *QueueManager, id string) (*queueWriter, error) {
 	var lastIndex int64
 	err := mgr.db.Query(`SELECT item_id FROM queue_items WHERE queue_id = ? ORDER BY item_id DESC LIMIT 1`, id).Scan(&lastIndex)
-	// Scan returns an ErrNotFound if the queue didn't previously exist. If
+	// Scan returns an ErrNotFound if the writer didn't previously exist. If
 	// that happens we default lastIndex to -1 so that nextIndex will be 0. If
 	// any other error occurs, return it.
 	if err == gocql.ErrNotFound {
@@ -48,17 +48,17 @@ func NewQueue(mgr *QueueManager, id string) (*Queue, error) {
 		return nil, err
 	}
 
-	queue := &Queue{
+	writer := &queueWriter{
 		id:              id,
 		nextIndex:       lastIndex + int64(1),
 		pendingRequests: make(chan *QueueItemBatchRequest),
 	}
 
-	go queue.process(mgr.db, mgr.done)
-	return queue, nil
+	go writer.process(mgr.db, mgr.done)
+	return writer, nil
 }
 
-func (queue *Queue) publish(items []QueueItemValue) (idx int64, err error) {
+func (writer *queueWriter) publish(items []QueueItemValue) (idx int64, err error) {
 	request := QueueItemBatchRequest{
 		items:      items,
 		resultChan: make(chan BatchResult),
@@ -70,17 +70,17 @@ func (queue *Queue) publish(items []QueueItemValue) (idx int64, err error) {
 		}
 	}()
 
-	queue.pendingRequests <- &request
+	writer.pendingRequests <- &request
 
 	result := <-request.resultChan
 	return result.idx, result.err
 }
 
-func (queue *Queue) process(db *gocql.Session, done *sync.WaitGroup) {
+func (writer *queueWriter) process(db *gocql.Session, done *sync.WaitGroup) {
 	done.Add(1)
 
 	for {
-		request := <-queue.pendingRequests
+		request := <-writer.pendingRequests
 
 		if request == nil {
 			break
@@ -89,22 +89,22 @@ func (queue *Queue) process(db *gocql.Session, done *sync.WaitGroup) {
 		// We got a request - drain any additional requests that are pending, then
 		// flush them all to the database
 		requests := []*QueueItemBatchRequest{request}
-		requests = append(requests, queue.drainPending()...)
-		queue.writeBatch(db, requests)
+		requests = append(requests, writer.drainPending()...)
+		writer.writeBatch(db, requests)
 	}
 	done.Done()
 }
 
-func (queue *Queue) shutdown() {
-	close(queue.pendingRequests)
+func (writer *queueWriter) shutdown() {
+	close(writer.pendingRequests)
 }
 
-func (queue *Queue) drainPending() []*QueueItemBatchRequest {
+func (writer *queueWriter) drainPending() []*QueueItemBatchRequest {
 	requests := []*QueueItemBatchRequest{}
 
 	for {
 		select {
-		case request := <-queue.pendingRequests:
+		case request := <-writer.pendingRequests:
 			if request == nil {
 				// This will happen (_not_ the default case) if the channel is closed
 				return requests
@@ -117,35 +117,35 @@ func (queue *Queue) drainPending() []*QueueItemBatchRequest {
 	}
 }
 
-func (queue *Queue) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequest) {
+func (writer *queueWriter) writeBatch(db *gocql.Session, requests []*QueueItemBatchRequest) {
 	dbBatch := gocql.NewBatch(gocql.UnloggedBatch)
 	i := int64(0)
 
 	for _, request := range requests {
 		for _, item := range request.items {
-			itemID := queue.nextIndex + i
-			dbBatch.Query(`INSERT INTO queue_items (queue_id, item_id, item_value) VALUES (?, ?, ?)`, queue.id, itemID, item)
+			itemID := writer.nextIndex + i
+			dbBatch.Query(`INSERT INTO queue_items (queue_id, item_id, item_value) VALUES (?, ?, ?)`, writer.id, itemID, item)
 			i++
 		}
 	}
 
 	err := db.ExecuteBatch(dbBatch)
-	queue.respond(requests, err)
+	writer.respond(requests, err)
 }
 
-func (queue *Queue) respond(requests []*QueueItemBatchRequest, err error) {
+func (writer *queueWriter) respond(requests []*QueueItemBatchRequest, err error) {
 	i := int64(0)
 
 	for _, request := range requests {
 		result := BatchResult{err: err}
 
 		if err == nil {
-			result.idx = queue.nextIndex + i
+			result.idx = writer.nextIndex + i
 		}
 
 		request.resultChan <- result
 		i += int64(len(request.items))
 	}
 
-	queue.nextIndex += i
+	writer.nextIndex += i
 }
