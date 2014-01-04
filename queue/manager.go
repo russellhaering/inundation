@@ -15,6 +15,7 @@
 package queue
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -23,6 +24,10 @@ import (
 
 const (
 	RESERVATION_TTL = 60
+)
+
+var (
+	ErrManagerShutdown = errors.New("queue manager is shutdown")
 )
 
 type ErrWrongManager struct {
@@ -39,12 +44,14 @@ type QueueManagerConfig struct {
 }
 
 type QueueManager struct {
-	name       string
-	config     QueueManagerConfig
-	queuesLock sync.RWMutex
-	queues     map[string]*Queue
-	db         *gocql.Session
-	done       *sync.WaitGroup
+	name          string
+	config        QueueManagerConfig
+	queuesLock    sync.RWMutex
+	queues        map[string]*Queue
+	db            *gocql.Session
+	done          *sync.WaitGroup
+	stopKeepAlive chan bool
+	stopped       bool
 }
 
 func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, error) {
@@ -57,39 +64,55 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 	}
 
 	mgr := &QueueManager{
-		name:   name,
-		config: config,
-		queues: make(map[string]*Queue),
-		db:     cassSession,
-		done:   &sync.WaitGroup{},
+		name:          name,
+		config:        config,
+		queues:        make(map[string]*Queue),
+		db:            cassSession,
+		done:          &sync.WaitGroup{},
+		stopKeepAlive: make(chan bool),
 	}
 
-	go mgr.heartbeatReservations()
+	go mgr.keepAlive()
 	return mgr, nil
 }
 
-func (mgr *QueueManager) heartbeatReservations() {
-	mgr.done.Add(1)
-	interval := (RESERVATION_TTL / 3) * time.Second
-	for {
-		time.Sleep(interval)
-		batch := gocql.NewBatch(gocql.UnloggedBatch)
-		mgr.queuesLock.RLock()
-		for queueID := range mgr.queues {
-			batch.Query(`UPDATE queue_managers USING TTL ? SET manager_id = ? WHERE queue_id = ?`,
-				RESERVATION_TTL, mgr.name, queueID)
-		}
-		mgr.queuesLock.RUnlock()
+func (mgr *QueueManager) keepAlive() {
+	ticker := time.NewTicker((RESERVATION_TTL / 3.0) * time.Second)
 
-		// TODO: Panic hard if an error occurs
-		mgr.db.ExecuteBatch(batch)
+	for {
+		select {
+		case <-mgr.stopKeepAlive:
+			break
+
+		case <-ticker.C:
+			mgr.heartbeatReservations()
+		}
 	}
-	mgr.done.Done()
+
+	ticker.Stop()
+}
+
+func (mgr *QueueManager) heartbeatReservations() {
+	batch := gocql.NewBatch(gocql.UnloggedBatch)
+
+	mgr.queuesLock.RLock()
+	for queueID := range mgr.queues {
+		batch.Query(`UPDATE queue_managers USING TTL ? SET manager_id = ? WHERE queue_id = ?`,
+			RESERVATION_TTL, mgr.name, queueID)
+	}
+	mgr.queuesLock.RUnlock()
+
+	// TODO: Panic hard if an error occurs
+	mgr.db.ExecuteBatch(batch)
 }
 
 func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 	// Hot path: just get the queue from the map
 	mgr.queuesLock.RLock()
+	if mgr.stopped {
+		return nil, ErrManagerShutdown
+	}
+
 	queue, exists := mgr.queues[queueID]
 	mgr.queuesLock.RUnlock()
 
@@ -112,6 +135,11 @@ func (mgr *QueueManager) getOrCreateQueue(queueID string) (*Queue, error) {
 	// then create it.
 	mgr.queuesLock.Lock()
 	defer mgr.queuesLock.Unlock()
+
+	if mgr.stopped {
+		return nil, ErrManagerShutdown
+	}
+
 	queue, exists = mgr.queues[queueID]
 
 	if exists {
@@ -149,4 +177,19 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItem) (int64, erro
 	}
 
 	return queue.publish(items)
+}
+
+func (mgr *QueueManager) Shutdown() {
+	mgr.queuesLock.Lock()
+	mgr.stopped = true
+	for _, queue := range mgr.queues {
+		queue.shutdown()
+	}
+	mgr.queuesLock.Unlock()
+
+	// Wait for all queues to drain
+	mgr.done.Wait()
+
+	// Kill the heartbeat
+	mgr.stopKeepAlive <- true
 }
