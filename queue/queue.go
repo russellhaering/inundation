@@ -60,11 +60,18 @@ func NewQueue(mgr *QueueManager, id string) (*Queue, error) {
 	return queue, nil
 }
 
-func (queue *Queue) publish(items []QueueItem) (int64, error) {
+func (queue *Queue) publish(items []QueueItem) (idx int64, err error) {
 	request := QueueItemBatchRequest{
 		items:      items,
 		resultChan: make(chan BatchResult),
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			err = ErrManagerShutdown
+		}
+	}()
+
 	queue.pendingRequests <- &request
 
 	result := <-request.resultChan
@@ -88,6 +95,10 @@ func (queue *Queue) process(db *gocql.Session, done *sync.WaitGroup) {
 		queue.writeBatch(db, requests)
 	}
 	done.Done()
+}
+
+func (queue *Queue) shutdown() {
+	close(queue.pendingRequests)
 }
 
 func (queue *Queue) drainPending() []*QueueItemBatchRequest {
