@@ -48,8 +48,22 @@ func (cfg *QueueManagerConfig) reservationTTL() time.Duration {
 	}
 }
 
+// QueueManager is used to publish to and read from queues. Every QueueManager
+// must supply a unique name - this is not enforced, but failure to do so will
+// result in Bad Things happening.
+//
+// Each queue may only be published to by a single QueueManager, which becomes
+// the master for that queue. Attempts to publish to a queue not owned by the
+// QueueManager will result in an ErrWrongManager error, which indicates the
+// name of the QueueManager responsible for that queue. For this reason, it may
+// be useful to encode the information needed to reach a QueueManager in its
+// name.  For example, if exposed by an HTTP API, the hostname and port of HTTP
+// service could be encoded in the manager's name in order to generate an
+// appropriate redirect.
+//
+// Any QueueManager may read from any queue.
 type QueueManager struct {
-	name          string
+	Name          string
 	config        QueueManagerConfig
 	mu            sync.RWMutex
 	writers       map[string]*queueWriter
@@ -59,6 +73,10 @@ type QueueManager struct {
 	stopped       bool
 }
 
+// NewQueueManager constructs a new QueueManager with a given name and
+// configuration. The QueueManagerConfig is copied by value, so attempts to
+// mutate a configuration already passed to NewQueueManager will have no
+// effect.
 func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, error) {
 	cassCluster := gocql.NewCluster(config.CassandraHosts...)
 	cassCluster.Keyspace = config.CassandraKeyspace
@@ -103,7 +121,7 @@ func (mgr *QueueManager) heartbeatReservations() {
 	mgr.mu.RLock()
 	for queueID := range mgr.writers {
 		batch.Query(`UPDATE queue_managers USING TTL ? SET manager_id = ? WHERE queue_id = ?`,
-			mgr.config.reservationTTL(), mgr.name, queueID)
+			mgr.config.reservationTTL(), mgr.Name, queueID)
 	}
 	mgr.mu.RUnlock()
 
@@ -132,7 +150,7 @@ func (mgr *QueueManager) getOrCreateQueueWriter(queueID string) (*queueWriter, e
 		return nil, err
 	}
 
-	if actualManager != "" && actualManager != mgr.name {
+	if actualManager != "" && actualManager != mgr.Name {
 		return nil, &ErrWrongManager{actualManager}
 	}
 
@@ -154,13 +172,13 @@ func (mgr *QueueManager) getOrCreateQueueWriter(queueID string) (*queueWriter, e
 	// Attempt to register as the manager for this queue
 	var uselessID string
 	applied, err := mgr.db.Query(`INSERT INTO queue_managers (queue_id, manager_id) VALUES (?, ?) IF NOT EXISTS USING TTL ?;`,
-		queueID, mgr.name, mgr.config.reservationTTL()).ScanCAS(&uselessID, &actualManager)
+		queueID, mgr.Name, mgr.config.reservationTTL()).ScanCAS(&uselessID, &actualManager)
 
 	if err != nil {
 		return nil, err
 	}
 
-	if !applied && actualManager != mgr.name {
+	if !applied && actualManager != mgr.Name {
 		_ = uselessID
 		return nil, &ErrWrongManager{actualManager}
 	}
@@ -174,6 +192,12 @@ func (mgr *QueueManager) getOrCreateQueueWriter(queueID string) (*queueWriter, e
 	return writer, nil
 }
 
+// Publish a batch of values to a queue. Each each value will be assigned an
+// integer ID.  Upon success, Publish will return the ID of the first value.
+// For example, if 4 values are published and an ID of 17 is returned, then the
+// four values have been assigned IDs 17, 18, 19 and 20 respectively.
+//
+// If the specified queue does not exist, it will be created.
 func (mgr *QueueManager) Publish(queueID string, items []QueueItemValue) (int64, error) {
 	writer, err := mgr.getOrCreateQueueWriter(queueID)
 
@@ -184,6 +208,7 @@ func (mgr *QueueManager) Publish(queueID string, items []QueueItemValue) (int64,
 	return writer.publish(items)
 }
 
+// Read values from a queue, starting at the specified index.
 func (mgr *QueueManager) Read(queueID string, startIndex int64, count int) ([]QueueItem, error) {
 	query := mgr.db.Query(`SELECT item_id, item_value FROM queue_items WHERE queue_id = ? AND item_id >= ? LIMIT ?;`,
 		queueID, startIndex, count)
@@ -215,6 +240,8 @@ func (mgr *QueueManager) Read(queueID string, startIndex int64, count int) ([]Qu
 	return items, nil
 }
 
+// Shutdown the queue manager. Subsequent writes will fail with
+// ErrManagerShutdown.
 func (mgr *QueueManager) Shutdown() {
 	mgr.mu.Lock()
 	mgr.stopped = true
