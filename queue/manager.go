@@ -87,7 +87,7 @@ func NewQueueManager(name string, config QueueManagerConfig) (*QueueManager, err
 	}
 
 	mgr := &QueueManager{
-		name:          name,
+		Name:          name,
 		config:        config,
 		writers:       make(map[string]*queueWriter),
 		db:            cassSession,
